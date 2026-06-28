@@ -1,0 +1,14 @@
+# Sensitive
+cookies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+
+# Chrome debug temp
+chrome_debug_*/
