@@ -1,5 +1,7 @@
 # Doubao2api
 
+项目使用MIMO模型辅助编写。
+
 将豆包 (doubao.com/chat) 封装为 OpenAI 兼容 API 的代理服务。
 
 ## 功能
