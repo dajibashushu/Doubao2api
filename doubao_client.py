@@ -2,26 +2,31 @@
 Doubao2api - 豆包 API 客户端
 
 本模块实现了与豆包服务器的通信逻辑，包括 Cookie 管理、请求构建、
-SSE 事件解析等功能。基于真实 API 抓包分析实现。
+SSE 事件解析等功能。基于豆包网页版 (pc_version 3.38.5) 前端逆向实现。
+
+请求体协议要点（与旧版差异）：
+- client_meta 新增 local_conversation_id、local_permissions 字段
+- option 新增 model_config / aggregate_params / conversation_mode /
+  support_lazy_fetch_stream / is_from_click_softlink 等字段
+- click_clear_context 由 true 改为 false（与前端一致）
+- 查询参数新增 scene=chatsse 与 tz_name（IANA 时区）
+- SSE 事件名与载荷结构保持不变
 
 @author: Doubao2api
-@version: 1.0.0
+@version: 2.0.0
 """
+import hashlib
 import json
 import logging
-import random
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 
-from config import config
+from config import ModelProfile, config
 
 logger = logging.getLogger(__name__)
-
-# Cookie 相关常量
-REQUIRED_COOKIE_NAMES = ["ttwid", "sessionid", "sid_tt"]
 
 
 def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
@@ -126,21 +131,36 @@ class DoubaoClient:
         """
         self.cookies = cookies
         self.conversation_id = ""
+        self.local_conversation_id = ""
         self.last_section_id = ""
         self.last_message_index = 0
-        self.device_id = cookies.get("device_id", "")
-        self.web_id = cookies.get("web_id", "")
-        self.tea_uuid = cookies.get("tea_uuid", self.web_id)
+        self.web_id = cookies.get("web_id", "") or self._stable_device_id()
+        # 前端 device_id 取 ttWidConfig.web_id（稳定值）；缺失时从会话 Cookie
+        # 派生稳定 ID，避免每次请求变换设备指纹触发风控
+        self.device_id = cookies.get("device_id", "") or self.web_id
+        self.tea_uuid = cookies.get("tea_uuid", "") or self.web_id
         self.fp = cookies.get("s_v_web_id", "")
         self.bot_id = config.bot_id
         self.ms_token = cookies.get("msToken", "")
         self.a_bogus = cookies.get("a_bogus", "")
 
+    def _stable_device_id(self) -> str:
+        """
+        从会话 Cookie 派生稳定的数字设备 ID（与前端 web_id 同为 18-19 位数字）
+
+        Returns:
+            稳定的设备 ID 字符串
+        """
+        seed = self.cookies.get("sessionid", "") or self.cookies.get("ttwid", "") or "doubao2api"
+        digest = hashlib.md5(seed.encode()).hexdigest()
+        return str(10**17 + int(digest[:16], 16) % (9 * 10**16))
+
     def _get_query_params(self) -> Dict[str, str]:
         """
         获取查询参数
 
-        构建豆包 API 请求所需的查询参数。
+        构建豆包 API 请求所需的查询参数。与前端一致，额外携带
+        scene=chatsse 与 tz_name（IANA 时区）。
 
         Returns:
             查询参数字典
@@ -155,6 +175,7 @@ class DoubaoClient:
             "pkg_type": config.pkg_type,
             "real_aid": config.aid,
             "region": config.region,
+            "scene": "chatsse",
             "samantha_web": config.samantha_web,
             "sys_region": config.sys_region,
             "tea_uuid": self.tea_uuid,
@@ -168,6 +189,8 @@ class DoubaoClient:
             params["msToken"] = self.ms_token
         if self.a_bogus:
             params["a_bogus"] = self.a_bogus
+        # 前端通过 Intl.DateTimeFormat().resolvedOptions().timeZone 附加 tz_name
+        params["tz_name"] = "Asia/Shanghai"
         return params
 
     def _get_headers(self) -> Dict[str, str]:
@@ -188,37 +211,52 @@ class DoubaoClient:
         """
         重置对话状态
 
-        生成新的会话ID和设备ID，重置对话状态。
-        每次新对话前调用此方法。
+        生成新的本地会话ID，重置对话状态。与前端一致：新对话使用
+        本地生成的 local_conversation_id，服务端 conversation_id 留空，
+        由 SSE_ACK 返回真实会话ID。device_id 保持稳定不随请求变化。
         """
-        self.conversation_id = str(random.randint(10000000000000000, 99999999999999999))
-        self.device_id = str(random.randint(10000000000000000, 99999999999999999))
+        self.local_conversation_id = str(uuid.uuid4())
+        self.conversation_id = ""
         self.last_section_id = ""
         self.last_message_index = 0
-        logger.info(f"新会话ID: {self.conversation_id}, 新设备ID: {self.device_id}")
+        logger.info(f"新本地会话ID: {self.local_conversation_id}")
 
-    def _build_completion_request(self, content: str) -> Dict[str, Any]:
+    def _build_completion_request(
+        self,
+        content: str,
+        model_profile: Optional[ModelProfile] = None,
+    ) -> Dict[str, Any]:
         """
         构建豆包 API 请求体
 
-        根据用户输入内容构建完整的请求体，包括客户端元数据、消息内容、
-        选项参数等。
+        按最新前端协议 (pc_version 3.38.5) 构建请求体，包括 client_meta、
+        消息内容块、option 参数（含模型选择 model_config / aggregate_params）。
 
         Args:
             content: 用户输入的文本内容
+            model_profile: 模型档案，None 时使用默认模型
 
         Returns:
             请求体字典
         """
+        if model_profile is None:
+            model_profile = config.get_model_profile(config.default_model)
+
         local_message_id = str(uuid.uuid4())
         block_id = str(uuid.uuid4())
 
+        conversation_init_ext: Dict[str, Any] = {
+            "model_item_key": model_profile.model_item_key,
+        }
+
         return {
             "client_meta": {
+                "local_conversation_id": self.local_conversation_id,
                 "conversation_id": self.conversation_id,
-                "bot_id": self.bot_id,
+                "bot_id": str(self.bot_id),
                 "last_section_id": self.last_section_id,
                 "last_message_index": self.last_message_index,
+                "local_permissions": [],
             },
             "messages": [
                 {
@@ -250,21 +288,24 @@ class DoubaoClient:
                 "collect_id": "",
                 "is_audio": False,
                 "answer_with_suggest": False,
+                "agent_mode": model_profile.agent_mode,
                 "tts_switch": False,
                 "need_deep_think": 0,
-                "click_clear_context": True,
+                "click_clear_context": False,
                 "from_suggest": False,
                 "is_regen": False,
                 "is_replace": False,
                 "is_from_click_option": False,
+                "is_from_click_softlink": False,
                 "disable_sse_cache": False,
                 "select_text_action": "",
                 "is_select_text": False,
                 "resend_for_regen": False,
                 "scene_type": 0,
-                "unique_key": str(uuid.uuid4()),
+                "unique_key": self.local_conversation_id,
                 "start_seq": 0,
                 "need_create_conversation": True,
+                "conversation_init_ext": conversation_init_ext,
                 "regen_query_id": [],
                 "edit_query_id": [],
                 "regen_instruction": "",
@@ -275,6 +316,7 @@ class DoubaoClient:
                 "sse_recv_event_options": {
                     "support_chunk_delta": True
                 },
+                "support_lazy_fetch_stream": True,
                 "is_ai_playground": False,
                 "is_old_user": True,
                 "recovery_option": {
@@ -282,20 +324,36 @@ class DoubaoClient:
                     "req_create_time_sec": int(time.time()),
                     "append_sse_event_scene": 0
                 },
-                "message_storage_type": 0
+                "message_storage_type": 0,
+                "related_deleted_message_ids": {},
+                "connector_info_list": [],
+                "model_config": {
+                    "model_item_key": model_profile.model_item_key,
+                    "model_extra_params": dict(model_profile.model_extra_params),
+                    "reasoning_effort": model_profile.reasoning_effort,
+                },
+                "aggregate_params": {
+                    "conversation_mode": str(model_profile.conversation_mode),
+                    "mode_id": "",
+                    "model_item_key": model_profile.model_item_key,
+                    "agent_mode": str(model_profile.agent_mode),
+                    "reasoning_effort": "",
+                    "provider_id": "",
+                },
+                "conversation_mode": model_profile.conversation_mode,
             },
             "user_context": [],
             "ext": {
                 "use_deep_think": "0",
                 "fp": self.fp,
                 "collection_id": "",
-                "commerce_credit_config_enable": "0"
             }
         }
 
     async def chat_completion_stream(
         self,
         messages: List[Dict[str, str]],
+        model: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         流式聊天补全
@@ -304,6 +362,7 @@ class DoubaoClient:
 
         Args:
             messages: 消息列表，每个消息包含 role 和 content
+            model: 对外 API 模型名，用于选择豆包内部模型
 
         Yields:
             SSE 事件字典，包含 event、id、data 字段
@@ -333,7 +392,9 @@ class DoubaoClient:
             f"只回答当前消息的内容。\n[用户消息]{content}"
         )
 
-        request_body = self._build_completion_request(content)
+        request_body = self._build_completion_request(
+            content, config.get_model_profile(model or config.default_model)
+        )
         params = self._get_query_params()
         headers = self._get_headers()
         url = f"{config.doubao_base_url}/chat/completion"
@@ -356,6 +417,31 @@ class DoubaoClient:
                         "data": {
                             "error_code": response.status_code,
                             "error_msg": f"HTTP {response.status_code}: {error_text[:200]}"
+                        }
+                    }
+                    return
+
+                # 豆包在业务失败（如登录过期、参数错误）时仍返回 HTTP 200，
+                # 但 Content-Type 为 application/json。此处据此把 JSON 错误体
+                # 转成结构化 error 事件，避免被当作空 SSE 流吞掉。
+                content_type = response.headers.get("content-type", "")
+                if "text/event-stream" not in content_type:
+                    raw = ""
+                    async for chunk in response.aiter_text():
+                        raw += chunk
+                    error_code, error_msg = 0, raw[:300]
+                    try:
+                        err_obj = json.loads(raw)
+                        error_code = err_obj.get("code", 0)
+                        error_msg = err_obj.get("msg") or err_obj.get("message") or raw[:300]
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    logger.warning(f"豆包返回非 SSE 响应 (code={error_code}): {error_msg[:200]}")
+                    yield {
+                        "event": "error",
+                        "data": {
+                            "error_code": error_code,
+                            "error_msg": f"豆包 API 错误 {error_code}: {error_msg}"
                         }
                     }
                     return
@@ -451,11 +537,12 @@ class DoubaoClient:
                 if conversation_id:
                     self.conversation_id = conversation_id
 
-    def _extract_text_from_event(self, event: Dict[str, Any]) -> Optional[str]:
+    def extract_text_from_event(self, event: Dict[str, Any]) -> Optional[str]:
         """
         从事件中提取文本内容
 
         根据不同的事件类型，从事件数据中提取文本内容。
+        （原 _extract_text_from_event，改为公开方法供 main.py 调用）
 
         Args:
             event: SSE 事件字典
@@ -501,14 +588,17 @@ class DoubaoClient:
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
+        model: Optional[str] = None,
     ) -> str:
         """
         非流式聊天补全
 
         向豆包服务器发送聊天请求，收集所有响应后返回完整文本。
+        与流式路径使用相同的快照/增量去重对齐逻辑，避免文本重复。
 
         Args:
             messages: 消息列表，每个消息包含 role 和 content
+            model: 对外 API 模型名，用于选择豆包内部模型
 
         Returns:
             完整的响应文本
@@ -517,32 +607,30 @@ class DoubaoClient:
             Exception: 豆包 API 返回错误时抛出异常
         """
         full_text = ""
+        emitted = ""
 
-        async for event in self.chat_completion_stream(messages):
+        async for event in self.chat_completion_stream(messages, model):
             event_type = event.get("event", "")
             data = event.get("data", {})
 
-            if event_type == "STREAM_MSG_NOTIFY":
-                text = self._extract_text_from_event(event)
-                if text:
-                    full_text = text
-
-            elif event_type == "STREAM_CHUNK":
-                text = self._extract_text_from_event(event)
-                if text:
-                    full_text += text
-
-            elif event_type == "CHUNK_DELTA":
-                text = self._extract_text_from_event(event)
-                if text:
-                    full_text += text
+            if event_type in ("STREAM_MSG_NOTIFY", "STREAM_CHUNK", "CHUNK_DELTA"):
+                text = self.extract_text_from_event(event)
+                if not text:
+                    continue
+                if event_type == "STREAM_MSG_NOTIFY":
+                    # 全量快照事件：整体替换
+                    new_full = text
+                else:
+                    # 增量事件：在已输出内容之后追加
+                    new_full = emitted + text
+                emitted = new_full
+                full_text = emitted
 
             elif event_type in ("SSE_REPLY_END", "STREAM_END"):
                 break
 
             elif event_type in ("error", "STREAM_ERROR"):
                 error_msg = data.get("error_msg", "Unknown error")
-                error_code = data.get("error_code", 0)
-                raise Exception(f"Doubao API error {error_code}: {error_msg}")
+                raise Exception(error_msg)
 
         return full_text

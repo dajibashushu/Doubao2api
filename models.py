@@ -52,7 +52,7 @@ class ChatCompletionRequest(BaseModel):
         user: 用户标识
     """
 
-    model: str = "doubao"
+    model: str = "doubao-fast"
     messages: List[ChatMessage]
     temperature: Optional[float] = None
     top_p: Optional[float] = None

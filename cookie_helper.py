@@ -7,7 +7,6 @@ Doubao2api - Cookie 提取助手
 @version: 1.0.0
 """
 import logging
-import re
 from typing import Dict, Optional
 
 from config import config
@@ -69,75 +68,6 @@ def save_cookies_to_file(
         f.write(cookie_str)
 
     logger.info(f"Cookie 已保存到 {cookie_file}")
-
-
-def _update_config_file(
-    device_id: Optional[str] = None,
-    web_id: Optional[str] = None,
-    tea_uuid: Optional[str] = None,
-    fp: Optional[str] = None
-) -> None:
-    """
-    更新 config.py 中的配置
-
-    Args:
-        device_id: 设备ID
-        web_id: Web ID
-        tea_uuid: Tea UUID
-        fp: 指纹信息
-    """
-    if not any([device_id, web_id, tea_uuid, fp]):
-        return
-
-    config_path = "config.py"
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        if device_id:
-            content = re.sub(
-                r'default_device_id:\s*str\s*=\s*"[^"]*"',
-                f'default_device_id: str = "{device_id}"',
-                content
-            )
-
-        if web_id:
-            content = re.sub(
-                r'default_web_id:\s*str\s*=\s*"[^"]*"',
-                f'default_web_id: str = "{web_id}"',
-                content
-            )
-
-        if tea_uuid:
-            content = re.sub(
-                r'default_tea_uuid:\s*str\s*=\s*"[^"]*"',
-                f'default_tea_uuid: str = "{tea_uuid}"',
-                content
-            )
-
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        logger.info("config.py 已更新")
-
-    except Exception as e:
-        logger.warning(f"更新 config.py 失败: {e}")
-
-
-def _update_config_with_cookies(cookies: Dict[str, str]) -> None:
-    """
-    从 Cookie 中更新配置信息
-
-    Args:
-        cookies: Cookie 字典
-    """
-    device_id = cookies.get('device_id', '')
-    web_id = cookies.get('web_id', '')
-    tea_uuid = cookies.get('tea_uuid', '')
-    fp = cookies.get('s_v_web_id', '')
-
-    if any([device_id, web_id, tea_uuid]):
-        _update_config_file(device_id, web_id, tea_uuid, fp)
 
 
 def _display_cookie_check(cookies: Dict[str, str]) -> None:
@@ -217,10 +147,6 @@ def _handle_qr_login() -> bool:
 
             # 保存 Cookie
             save_cookies_to_file(cookies)
-
-            # 更新配置
-            all_info = {**cookies, **config_info}
-            _update_config_with_cookies(all_info)
 
             _print_success_info()
             return True

@@ -4,12 +4,14 @@
 
 将豆包 (doubao.com/chat) 封装为 OpenAI 兼容 API 的代理服务。
 
+> 协议基于豆包网页版 pc_version 3.38.5 (2026-09) 前端逆向适配。
+
 ## 功能
 
 - OpenAI Chat Completions API 兼容
 - 流式 (SSE) 和非流式响应
 - 扫码登录自动获取配置
-- 多模型支持
+- 多模型支持（映射豆包 快速 / Turbo / Pro / Lite / Auto）
 
 ## 快速开始
 
@@ -81,10 +83,17 @@ print(response.choices[0].message.content)
 
 ## 可用模型
 
-- `doubao-pro` - 专业版
-- `doubao-lite` - 轻量版
-- `doubao-1.5-pro` - 1.5 专业版
-- `doubao-1.5-lite` - 1.5 轻量版
+| 模型名 | 豆包内部模型 | 说明 |
+|--------|-------------|------|
+| `doubao-fast` | model_item_key=0 | 豆包 快速（默认，对话模式） |
+| `doubao-turbo` | model_item_key=3 | 豆包 2.1 Turbo（对话模式） |
+| `doubao-auto` | model_item_key=9 | 工作任务 Auto |
+| `doubao-work-turbo` | model_item_key=4 | 工作任务 Turbo |
+| `doubao-pro` | model_item_key=5 | 工作任务 Pro |
+| `doubao-lite` | seed-lite-7b | 豆包 2.1 Lite |
+
+旧模型名 `doubao-1.5-pro` / `doubao-1.5-lite` 仍兼容，分别映射 Turbo / Lite。
+未识别的模型名回退到 `doubao-fast`。
 
 ## 项目结构
 

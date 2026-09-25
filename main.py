@@ -241,7 +241,7 @@ async def chat_completions(request: ChatCompletionRequest) -> Any:
                 {"role": m.role, "content": _extract_text_content(m.content)}
                 for m in messages
             ]
-            full_text = await client.chat_completion(message_dicts)
+            full_text = await client.chat_completion(message_dicts, request.model)
 
             prompt_text = " ".join(_extract_text_content(m.content) for m in messages)
             prompt_tokens = _estimate_tokens(prompt_text)
@@ -368,12 +368,12 @@ async def _stream_response(
             )
             return f"data: {json.dumps(chunk.model_dump())}\n\n"
 
-        async for event in client.chat_completion_stream(message_dicts):
+        async for event in client.chat_completion_stream(message_dicts, model):
             event_type = event.get("event", "")
             data = event.get("data", {})
 
             if event_type in ("STREAM_MSG_NOTIFY", "STREAM_CHUNK", "CHUNK_DELTA"):
-                text = client._extract_text_from_event(event)
+                text = client.extract_text_from_event(event)
                 if not text:
                     continue
                 if event_type == "STREAM_MSG_NOTIFY":

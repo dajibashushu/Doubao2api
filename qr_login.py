@@ -10,7 +10,6 @@ Doubao2api - 扫码登录模块
 @author: Doubao2api
 @version: 1.0.0
 """
-import asyncio
 import json
 import logging
 import os

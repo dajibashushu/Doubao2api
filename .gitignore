@@ -12,3 +12,6 @@ venv/
 
 # Chrome debug temp
 chrome_debug_*/
+
+# 抓包分析临时产物
+.capture/
