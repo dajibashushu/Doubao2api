@@ -352,21 +352,22 @@ async def _stream_response(
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
+    def _delta_sse(delta_text: str) -> str:
+        chunk = ChatCompletionChunk(
+            id=request_id,
+            model=model,
+            created=created,
+            choices=[StreamChoice(delta=DeltaMessage(content=delta_text))],
+        )
+        return f"data: {json.dumps(chunk.model_dump())}\n\n"
+
+    # emitted 跟踪已输出的文本，供错误分支判断是否已有正常内容
+    emitted = ""
     try:
         message_dicts = [
             {"role": m.role, "content": _extract_text_content(m.content)}
             for m in messages
         ]
-        emitted = ""
-
-        def _delta_sse(delta_text: str) -> str:
-            chunk = ChatCompletionChunk(
-                id=request_id,
-                model=model,
-                created=created,
-                choices=[StreamChoice(delta=DeltaMessage(content=delta_text))],
-            )
-            return f"data: {json.dumps(chunk.model_dump())}\n\n"
 
         async for event in client.chat_completion_stream(message_dicts, model):
             event_type = event.get("event", "")
@@ -410,18 +411,20 @@ async def _stream_response(
                 if "verify" in str(data.get("extra", {})).lower() or "captcha" in error_msg.lower():
                     error_msg = f"需要验证码，请在浏览器中手动完成验证后重试。原始错误: {error_msg}"
 
-                chunk = ChatCompletionChunk(
-                    id=request_id,
-                    model=model,
-                    created=created,
-                    choices=[
-                        StreamChoice(
-                            delta=DeltaMessage(content=f"\n\n[错误] {error_msg}"),
-                            finish_reason="stop"
-                        )
-                    ],
-                )
-                yield f"data: {json.dumps(chunk.model_dump())}\n\n"
+                if emitted:
+                    # 已有正常内容：以增量文本补充错误说明，保持会话完整
+                    yield _delta_sse(f"\n\n[错误] {error_msg}")
+                else:
+                    # 尚无任何输出：以顶层 error 对象发出，客户端可识别为错误
+                    # 而非当作正常回答内容
+                    error_payload = {
+                        "error": {
+                            "message": error_msg,
+                            "type": "upstream_error",
+                            "code": data.get("error_code", "upstream_error"),
+                        }
+                    }
+                    yield f"data: {json.dumps(error_payload)}\n\n"
                 yield "data: [DONE]\n\n"
                 return
 
@@ -429,18 +432,10 @@ async def _stream_response(
                 continue
 
     except Exception as e:
-        error_chunk = ChatCompletionChunk(
-            id=request_id,
-            model=model,
-            created=created,
-            choices=[
-                StreamChoice(
-                    delta=DeltaMessage(content=f"\n\n[错误] {str(e)}"),
-                    finish_reason="stop"
-                )
-            ],
-        )
-        yield f"data: {json.dumps(error_chunk.model_dump())}\n\n"
+        if emitted:
+            yield _delta_sse(f"\n\n[错误] {str(e)}")
+        else:
+            yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error', 'code': 'internal_error'}})}\n\n"
         yield "data: [DONE]\n\n"
 
 

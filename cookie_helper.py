@@ -131,7 +131,7 @@ def _handle_qr_login() -> bool:
         print("将自动打开 Chrome 浏览器，请在浏览器中完成登录")
         print()
 
-        success, cookies, config_info = qr_login()
+        success, cookies = qr_login()
 
         if success and cookies:
             print(f"\n✓ 登录成功！获取到 {len(cookies)} 个 Cookie")

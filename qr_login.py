@@ -124,18 +124,6 @@ class ChromeDebugger:
         result = self.send_command("Network.getCookies")
         return result.get("result", {}).get("cookies", [])
 
-    def take_screenshot(self) -> Optional[str]:
-        """
-        截取页面截图
-
-        Returns:
-            Base64 编码的截图数据
-        """
-        result = self.send_command("Page.captureScreenshot", {
-            "format": "png"
-        })
-        return result.get("result", {}).get("data")
-
     def wait_for_navigation(self, timeout: int = 10) -> bool:
         """
         等待页面导航完成
@@ -303,138 +291,10 @@ def get_page_list(port: int = 9222) -> List[Dict]:
         return []
 
 
-def capture_qrcode_from_page(debugger: ChromeDebugger) -> Optional[bytes]:
-    """
-    从页面捕获二维码图片
-
-    Args:
-        debugger: Chrome 调试器实例
-
-    Returns:
-        二维码图片数据（Base64 解码后），如果捕获失败返回 None
-    """
-    try:
-        # 方法1: 查找二维码 img 元素并截图
-        qr_selectors = [
-            'img[src*="qrcode"]',
-            'img[src*="qr"]',
-            '.qrcode img',
-            '.qr-code img',
-            '[class*="qr"] img',
-            'img[class*="qr"]',
-        ]
-
-        for selector in qr_selectors:
-            # 检查元素是否存在
-            exists = debugger.evaluate(f'''!!document.querySelector("{selector}")''')
-            if exists:
-                # 获取元素位置和尺寸
-                rect = debugger.evaluate(f'''(() => {{
-                    const el = document.querySelector("{selector}");
-                    if (!el) return null;
-                    const r = el.getBoundingClientRect();
-                    return {{x: r.x, y: r.y, width: r.width, height: r.height}};
-                }})()''')
-
-                if rect and rect.get("width", 0) > 50:
-                    logger.info(f"找到二维码元素: {selector}")
-                    # 截取整个页面，后续可以裁剪
-                    screenshot_b64 = debugger.take_screenshot()
-                    if screenshot_b64:
-                        import base64
-                        return base64.b64decode(screenshot_b64)
-
-        # 方法2: 查找 canvas 元素
-        canvas_data = debugger.evaluate('''(() => {
-            const canvas = document.querySelector('canvas');
-            if (canvas) {
-                return canvas.toDataURL('image/png');
-            }
-            return null;
-        })()''')
-
-        if canvas_data and canvas_data.startswith('data:image'):
-            import base64
-            base64_data = canvas_data.split(',')[1]
-            return base64.b64decode(base64_data)
-
-        # 方法3: 截取整个页面
-        screenshot_b64 = debugger.take_screenshot()
-        if screenshot_b64:
-            import base64
-            return base64.b64decode(screenshot_b64)
-
-        return None
-
-    except Exception as e:
-        logger.error(f"捕获二维码失败: {e}")
-        return None
-
-
-def display_qrcode_in_terminal(image_data: bytes) -> bool:
-    """
-    在终端显示二维码
-
-    使用 ASCII 字符在终端中显示二维码。
-
-    Args:
-        image_data: 二维码图片数据
-
-    Returns:
-        是否成功显示
-    """
-    try:
-        from PIL import Image
-        import io
-
-        img = Image.open(io.BytesIO(image_data))
-        img = img.convert('L')
-
-        width, height = img.size
-
-        # 缩放图片
-        target_size = 25
-        ratio = min(target_size / width, target_size / height)
-        new_width = int(width * ratio)
-        new_height = int(height * ratio)
-        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-        pixels = list(img.getdata())
-
-        print("\n" + "=" * 50)
-        print("  请使用豆包 APP 扫描下方二维码登录")
-        print("=" * 50)
-        print()
-
-        for y in range(new_height):
-            line = ""
-            for x in range(new_width):
-                pixel = pixels[y * new_width + x]
-                if pixel < 128:
-                    line += "██"
-                else:
-                    line += "  "
-            print(f"  {line}")
-
-        print()
-        print("=" * 50)
-        print(f"  二维码将在 {QR_CODE_TIMEOUT} 秒后过期")
-        print("=" * 50)
-
-        return True
-
-    except ImportError:
-        logger.warning("Pillow 未安装，无法在终端显示二维码")
-        return False
-    except Exception as e:
-        logger.error(f"显示二维码失败: {e}")
-        return False
-
-
 def qr_login(
     timeout: int = QR_CODE_TIMEOUT,
     port: int = 9222
-) -> Tuple[bool, Dict[str, str], Dict[str, str]]:
+) -> Tuple[bool, Dict[str, str]]:
     """
     扫码登录
 
@@ -445,26 +305,24 @@ def qr_login(
         port: Chrome 调试端口号
 
     Returns:
-        (success, cookies, config) 三元组：
+        (success, cookies) 二元组：
         - success: 是否登录成功
         - cookies: Cookie 字典
-        - config: 配置信息字典
     """
     cookies: Dict[str, str] = {}
-    config_info: Dict[str, str] = {}
     chrome_process = None
 
     try:
         # 启动 Chrome
         chrome_process = launch_chrome_with_debugging(port)
         if not chrome_process:
-            return False, {}, {}
+            return False, {}
 
         # 获取 WebSocket URL
         ws_url = get_websocket_url(port)
         if not ws_url:
             logger.error("无法获取 Chrome DevTools WebSocket URL")
-            return False, {}, {}
+            return False, {}
 
         logger.info(f"连接到 Chrome DevTools: {ws_url}")
         debugger = ChromeDebugger(ws_url)
@@ -564,60 +422,11 @@ def qr_login(
                 if not is_logged_in:
                     logger.error("登录超时")
                     print("\n✗ 登录超时，请重新尝试")
-                    return False, {}, {}
+                    return False, {}
 
             # 登录成功，等待页面完全加载
             logger.info("等待页面完全加载...")
             time.sleep(5)
-
-            # 发送测试消息获取配置
-            logger.info("发送测试消息获取配置...")
-            try:
-                input_exists = debugger.evaluate('''!!(
-                    document.querySelector('textarea') ||
-                    document.querySelector('[contenteditable="true"]')
-                )''')
-
-                if input_exists:
-                    # 点击输入框
-                    debugger.evaluate('''(() => {
-                        const input = document.querySelector('textarea') ||
-                                      document.querySelector('[contenteditable="true"]');
-                        if (input) input.click();
-                    })()''')
-                    time.sleep(0.5)
-
-                    # 输入测试消息
-                    debugger.evaluate('''(() => {
-                        const input = document.querySelector('textarea') ||
-                                      document.querySelector('[contenteditable="true"]');
-                        if (input) {
-                            input.focus();
-                            input.textContent = 'test';
-                            input.dispatchEvent(new Event('input', { bubbles: true }));
-                        }
-                    })()''')
-                    time.sleep(0.5)
-
-                    # 发送消息（按 Enter）
-                    debugger.send_command("Input.dispatchKeyEvent", {
-                        "type": "keyDown",
-                        "key": "Enter",
-                        "code": "Enter",
-                        "windowsVirtualKeyCode": 13,
-                        "nativeVirtualKeyCode": 13,
-                    })
-                    debugger.send_command("Input.dispatchKeyEvent", {
-                        "type": "keyUp",
-                        "key": "Enter",
-                        "code": "Enter",
-                        "windowsVirtualKeyCode": 13,
-                        "nativeVirtualKeyCode": 13,
-                    })
-                    time.sleep(5)
-
-            except Exception as e:
-                logger.warning(f"发送测试消息失败: {e}")
 
             # 获取 Cookie
             logger.info("获取 Cookie...")
@@ -628,50 +437,15 @@ def qr_login(
                 if name and value:
                     cookies[name] = value
 
-            # 提取配置信息
-            current_url = debugger.evaluate("window.location.href")
-            logger.info(f"当前 URL: {current_url}")
-
-            try:
-                config_data = debugger.evaluate('''(() => {
-                    const result = {};
-
-                    const urlParams = new URLSearchParams(window.location.search);
-                    result.device_id = urlParams.get('device_id') || '';
-                    result.web_id = urlParams.get('web_id') || '';
-                    result.tea_uuid = urlParams.get('tea_uuid') || '';
-
-                    try {
-                        const keys = ['device_id', 'web_id', 'tea_uuid', 's_v_web_id'];
-                        for (const key of keys) {
-                            const value = localStorage.getItem(key);
-                            if (value) result[key] = value;
-                        }
-                    } catch (e) {}
-
-                    return result;
-                })()''')
-
-                if config_data:
-                    for key, value in config_data.items():
-                        if value:
-                            config_info[key] = value
-
-            except Exception as e:
-                logger.warning(f"提取配置信息失败: {e}")
-
-            if 's_v_web_id' in cookies:
-                config_info['fp'] = cookies['s_v_web_id']
-
             logger.info(f"成功获取 {len(cookies)} 个 Cookie")
-            return True, cookies, config_info
+            return True, cookies
 
         finally:
             debugger.close()
 
     except Exception as e:
         logger.error(f"扫码登录失败: {e}")
-        return False, {}, {}
+        return False, {}
     finally:
         if chrome_process:
             try:
@@ -687,11 +461,10 @@ if __name__ == "__main__":
     print("豆包扫码登录")
     print("=" * 50)
 
-    success, cookies, config_info = qr_login()
+    success, cookies = qr_login()
 
     if success:
         print("\n登录成功！")
         print(f"获取到 {len(cookies)} 个 Cookie")
-        print(f"配置信息: {config_info}")
     else:
         print("\n登录失败！")

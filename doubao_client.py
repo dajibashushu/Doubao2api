@@ -345,7 +345,6 @@ class DoubaoClient:
             "user_context": [],
             "ext": {
                 "use_deep_think": "0",
-                "fp": self.fp,
                 "collection_id": "",
             }
         }

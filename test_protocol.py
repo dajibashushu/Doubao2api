@@ -72,7 +72,7 @@ def test_request_body():
     opt = body["option"]
     assert opt["need_create_conversation"] is True
     assert opt["click_clear_context"] is False
-    assert opt["support_chunk_delta"] if False else opt["sse_recv_event_options"] == {"support_chunk_delta": True}
+    assert opt["sse_recv_event_options"] == {"support_chunk_delta": True}
     assert opt["support_lazy_fetch_stream"] is True
     assert opt["is_from_click_softlink"] is False
     assert opt["scene_type"] == 0
