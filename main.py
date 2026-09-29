@@ -13,15 +13,18 @@ Doubao2api - FastAPI 主服务
 @author: Doubao2api
 @version: 1.0.0
 """
+import hmac
 import json
 import logging
+import os
 import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, List
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -155,6 +158,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def api_key_guard(request: Request, call_next):
+    """API Key 闸门（本地补丁，2026-09-29 加）。
+
+    上游版本**完全没有鉴权**：`/v1/chat/completions` 谁都能调，挂上公网就等于把
+    自己的豆包账号送人。这里加一层可选闸门：只有设置了环境变量 `DOUBAO_API_KEY`
+    才启用（不设 = 保持上游行为，纯本地用不受影响）。
+
+    接受三种传法：`Authorization: Bearer <key>`、`x-api-key` / `x-goog-api-key`、
+    查询串 `?key=`。`/health` 永远放行（探活用）；比较用 hmac.compare_digest。
+    """
+    key = (os.environ.get("DOUBAO_API_KEY") or "").strip()
+    if key and request.url.path != "/health":
+        supplied = ""
+        auth = request.headers.get("authorization", "") or ""
+        if auth.lower().startswith("bearer "):
+            supplied = auth[7:].strip()
+        if not supplied:
+            supplied = (request.headers.get("x-api-key")
+                        or request.headers.get("x-goog-api-key") or "").strip()
+        if not supplied:
+            supplied = (request.query_params.get("key") or "").strip()
+        if not hmac.compare_digest(supplied, key):
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "invalid api key",
+                                   "type": "auth_error", "code": "invalid_api_key"}},
+            )
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -437,6 +471,207 @@ async def _stream_response(
         else:
             yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error', 'code': 'internal_error'}})}\n\n"
         yield "data: [DONE]\n\n"
+
+
+# ─── AI 画图（本地补丁 2026-09-29，上游没有）───────────────────────────────
+# 上游只有文本通道，客户端打 /v1/images/generations 会 404。这里按浏览器真实抓包补齐：
+# 同一个 /chat/completion 端点，加 chat_ability 声明 ability_type=3（生图），
+# ability_param 里带模型 "Seedream 5.0 Flash" 与比例 ratio。
+# 图片 URL 在 SSE 的
+#   .patch_op[0].patch_value.content_block[0].content.creation_block.creations[N].image
+# 下，多个变体：image_ori / image_preview / image_thumb 带水印（右下角「豆包AI生成」），
+# **image_ori_raw.url 是无水印原图**（2026-09-29 实测 3.2MB PNG、肉眼确认无水印），
+# 所以优先取它，取不到再退化到 image_ori。
+_IMAGE_MODEL = "Seedream 5.0 Flash"
+_IMAGE_RATIOS = {"1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4, "16:9": 16 / 9,
+                 "9:16": 9 / 16, "3:2": 1.5, "2:3": 2 / 3, "21:9": 21 / 9}
+
+
+def _ratio_from_size(size: Optional[str]) -> str:
+    """把 OpenAI 的 `size`（如 1024x1792）映射成豆包要的 ratio 字符串。"""
+    m = re.match(r"^\s*(\d+)\s*[xX*]\s*(\d+)\s*$", str(size or ""))
+    if not m:
+        return "auto"
+    w, h = int(m.group(1)), int(m.group(2))
+    if w <= 0 or h <= 0 or w == h:
+        return "1:1"
+    from math import gcd
+    g = gcd(w, h)
+    key = f"{w // g}:{h // g}"
+    if key in _IMAGE_RATIOS:
+        return key
+    target = w / h
+    return min(_IMAGE_RATIOS, key=lambda k: abs(_IMAGE_RATIOS[k] - target))
+
+
+def _extract_block_text(node, out: List[str]) -> None:
+    """递归收集 SSE 里的 text_block 文本（用来识别豆包的内容审核拒绝话术）。"""
+    if isinstance(node, dict):
+        tb = node.get("text_block")
+        if isinstance(tb, dict) and tb.get("text"):
+            out.append(str(tb["text"]))
+        for v in node.values():
+            _extract_block_text(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _extract_block_text(v, out)
+
+
+def _collect_creation_images(node, out: dict) -> None:
+    """递归找出 SSE 里的 creation_block.creations，按图片 key 去重收集变体。"""
+    if isinstance(node, dict):
+        creations = node.get("creation_block", {}).get("creations") if "creation_block" in node else None
+        if creations is None and isinstance(node.get("creations"), list):
+            creations = node["creations"]
+        for item in (creations or []):
+            img = (item or {}).get("image") or {}
+            key = img.get("image_key") or img.get("key") or (
+                (img.get("image_ori") or {}).get("url", "")[:80])
+            if not key:
+                continue
+            urls = {}
+            for variant in ("image_ori_raw", "image_ori", "image_preview", "image_thumb"):
+                v = img.get(variant) or {}
+                if v.get("url"):
+                    urls[variant] = v["url"]
+            if urls:
+                out.setdefault(key, {}).update(urls)
+        for v in node.values():
+            _collect_creation_images(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _collect_creation_images(v, out)
+
+
+async def _doubao_generate_images(prompt: str, ratio: str, want: int, timeout: float = 240.0):
+    """调上游生图，返回 [{url, ...}]（去重后最多 want 张）。"""
+    import httpx
+
+    cookies = get_cookies()
+    client = DoubaoClient(cookies)
+    client.reset_conversation()
+    payload = client._build_completion_request(f"生成图片：{prompt}")
+    ability = {"ability_type": 1, "ability_param": {
+        "model": _IMAGE_MODEL, "ratio": ratio,
+        "input_box_content": {"user_input_content": prompt, "reply_message_format": "生成图片：%s"}}}
+    payload["chat_ability"] = {
+        "ability_type": 3,
+        "ability_param": json.dumps(ability, ensure_ascii=False, separators=(",", ":")),
+    }
+
+    found: Dict[str, Dict[str, str]] = {}
+    refusal = ""
+    url = f"{config.doubao_base_url}/chat/completion"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30.0),
+                                 cookies=cookies, follow_redirects=True) as c:
+        async with c.stream("POST", url, params=client._get_query_params(),
+                            headers=client._get_headers(), json=payload) as resp:
+            if resp.status_code != 200:
+                body = (await resp.aread()).decode("utf-8", "replace")
+                raise HTTPException(status_code=502,
+                                    detail=f"豆包生图返回 HTTP {resp.status_code}: {body[:300]}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except Exception:
+                    continue
+                _collect_creation_images(event, found)
+                # 内容审核拒绝时豆包会回一段说明文字（无图片）——必须识别出来，
+                # 否则调用方只看到“没图”的 502，完全不知道是被审核拦了。
+                texts: List[str] = []
+                _extract_block_text(event, texts)
+                for t in texts:
+                    if any(k in t for k in ("涉嫌违反", "使用规范", "内容审核", "无法生成", "换个话题")):
+                        refusal = t.strip()
+                if len(found) >= want:
+                    break
+
+    images = []
+    for key, variants in found.items():
+        images.append({"key": key, "url": variants.get("image_ori_raw") or variants.get("image_ori"),
+                       "watermarked_url": variants.get("image_ori")})
+    images = [i for i in images if i["url"]]
+    return images[:want], refusal
+
+
+@app.post("/v1/images/generations")
+async def images_generations(request: Request) -> Any:
+    """OpenAI 兼容的图像生成（本地补丁）。
+
+    请求体：{"model": "...", "prompt": "...", "n": 1, "size": "1024x1792",
+             "response_format": "url" | "b64_json"}
+    返回：{"created": ts, "data": [{"url": ...} | {"b64_json": ...}]}
+    额外字段（guidance_scale / batch_size / image_size 等）忽略，不影响调用。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    try:
+        n = max(1, min(int(body.get("n") or 1), 4))
+    except (TypeError, ValueError):
+        n = 1
+    ratio = _ratio_from_size(body.get("size") or body.get("image_size"))
+    fmt = str(body.get("response_format") or "url").lower()
+
+    logger.info(f"生图请求: prompt={prompt[:40]!r} n={n} size={body.get('size')} ratio={ratio}")
+    images, refusal = await _doubao_generate_images(prompt, ratio, n)
+    if not images:
+        if refusal:
+            raise HTTPException(status_code=400, detail=f"豆包内容审核拒绝：{refusal}")
+        raise HTTPException(
+            status_code=502,
+            detail="豆包未返回图片（可能触发风控/验证码、额度不足，或上游协议又变了）")
+
+    data: List[Dict[str, str]] = []
+    if fmt == "b64_json":
+        import base64
+        import httpx
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as c:
+            for img in images:
+                r = await c.get(img["url"], headers={"referer": config.doubao_base_url + "/"})
+                r.raise_for_status()
+                data.append({"b64_json": base64.b64encode(r.content).decode()})
+    else:
+        for img in images:
+            data.append({"url": img["url"], "watermarked_url": img.get("watermarked_url") or ""})
+
+    return {"created": int(time.time()), "model": str(body.get("model") or "doubao"),
+            "data": data}
+
+
+@app.exception_handler(HTTPException)
+async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """把 /v1 下的错误统一成 OpenAI 形状的 {"error": {...}}（本地补丁）。
+
+    FastAPI 默认回 `{"detail": "..."}`，实测 iOS 类客户端解析失败会报
+    「未能读取数据，因为它的格式不正确」——错误原因完全丢失。
+    """
+    if request.url.path.startswith("/v1"):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {
+                "message": str(exc.detail),
+                "type": "upstream_error" if exc.status_code >= 500 else "invalid_request_error",
+                "code": exc.status_code,
+            }},
+        )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    if request.url.path.startswith("/v1"):
+        return JSONResponse(status_code=422, content={"error": {
+            "message": f"invalid request: {exc.errors()[:2]}",
+            "type": "invalid_request_error", "code": 422}})
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 @app.exception_handler(Exception)
