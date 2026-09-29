@@ -1,3 +1,8 @@
+> 🔧 **本 fork 的改动（二创）**：基于上游 [Hu410/Doubao2api](https://github.com/Hu410/Doubao2api)（基线 `b8f108b`），
+> 在 `main.py` 中新增了**图像生成相关功能**（OpenAI 兼容的 `POST /v1/images/generations`、返回无水印原图、
+> `size` 自动换算画幅比例、内容审核拒绝可读化、`/v1/*` 错误统一 OpenAI 格式、可选 `DOUBAO_API_KEY` 鉴权等）。
+> **clone 本 fork 即可直接运行，无需再打补丁。** 完整说明见 **[IMAGES_PATCH.md](IMAGES_PATCH.md)**。
+
 # Doubao2api
 
 项目使用MIMO模型辅助编写。
