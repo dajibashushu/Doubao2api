@@ -17,6 +17,8 @@
 - 流式 (SSE) 和非流式响应
 - 扫码登录自动获取配置
 - 多模型支持（映射豆包 快速 / Turbo / Pro / Lite / Auto）
+- **图像生成 API 兼容（`POST /v1/images/generations`，返回无水印原图）**
+- **可选 API Key 鉴权（设置环境变量 `DOUBAO_API_KEY` 后生效）**
 
 ## 快速开始
 
@@ -56,6 +58,7 @@ model:    doubao-pro
 |------|------|------|
 | `/v1/models` | GET | 列出可用模型 |
 | `/v1/chat/completions` | POST | 聊天补全 |
+| `/v1/images/generations` | POST | **图像生成（OpenAI Images 兼容，返回无水印原图）** |
 | `/health` | GET | 健康检查 |
 | `/reload-cookies` | POST | 重新加载 Cookie |
 
@@ -71,6 +74,15 @@ curl http://localhost:9876/v1/chat/completions \
     "messages": [{"role": "user", "content": "你好"}]
   }'
 ```
+
+### curl（图像生成）
+
+```bash
+curl http://localhost:9876/v1/images/generations   -H "Content-Type: application/json"   -d '{"model": "doubao", "prompt": "一只穿西装的柯基在办公室开会", "n": 1, "size": "1024x1024"}'
+```
+
+返回 `data[0].url` 为**无水印原图**，`data[0].watermarked_url` 为带水印版本；
+`response_format=b64_json` 时直接返回 base64。更多说明见 [IMAGES_PATCH.md](IMAGES_PATCH.md)。
 
 ### Python
 
@@ -113,6 +125,8 @@ Doubao2api/
 ├── cookies.txt          # Cookie 文件
 ├── requirements.txt     # 依赖列表
 ├── start.bat            # Windows 启动脚本
+├── IMAGES_PATCH.md       # 本 fork 的二创说明与新增功能
+├── 0001-images-generations.patch  # 图像生成补丁文件
 └── README.md            # 本文档
 ```
 
