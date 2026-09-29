@@ -60,17 +60,14 @@ python main.py
 
 ```bash
 curl http://localhost:9876/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
     "model": "doubao-pro",
-    "messages": [{"role": "user", "content": "你好"}]
-  }'
+  
 ```
 
 ### curl（图像生成）
 
 ```bash
-curl http://localhost:9876/v1/images/generations   -H "Content-Type: application/json"   -d '{"model": "doubao", "prompt": "一只穿西装的柯基在办公室开会", "n": 1, "size": "1024x1024"}'
+curl http://localhost:9876/v1/images/generations   
 "model": "doubao-seedream-5-0-260128"
 ```
 
