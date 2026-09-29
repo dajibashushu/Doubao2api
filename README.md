@@ -44,14 +44,6 @@ python main.py
 
 或双击 `start.bat` (Windows)
 
-### 4. 配置客户端
-
-```
-base_url: http://localhost:9876/v1
-api_key:  doubao
-model:    doubao-pro
-```
-
 ## API 端点
 
 | 端点 | 方法 | 说明 |
@@ -79,6 +71,7 @@ curl http://localhost:9876/v1/chat/completions \
 
 ```bash
 curl http://localhost:9876/v1/images/generations   -H "Content-Type: application/json"   -d '{"model": "doubao", "prompt": "一只穿西装的柯基在办公室开会", "n": 1, "size": "1024x1024"}'
+"model": "doubao-seedream-5-0-260128"
 ```
 
 返回 `data[0].url` 为**无水印原图**，`data[0].watermarked_url` 为带水印版本；
